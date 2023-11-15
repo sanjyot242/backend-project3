@@ -1,6 +1,6 @@
 import contextlib
 import sqlite3
-
+import redis
 from fastapi import Depends, HTTPException, APIRouter, Header, status
 from enrollment_service.database.schemas import Class
 
@@ -10,6 +10,7 @@ dropped = []
 FREEZE = False
 MAX_WAITLIST = 3
 database = "enrollment_service/database/database.db"
+redis_client = redis.StrictRedis(host='localhost', port=6379, db =0, decode_responses=True)
 
 # Connect to the database
 def get_db():
