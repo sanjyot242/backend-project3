@@ -1,6 +1,7 @@
 import contextlib
 import sqlite3
-
+import boto3
+from botocore.exceptions import ClientError
 from fastapi import Depends, HTTPException, APIRouter, Header, status
 from enrollment_service.database.schemas import Class
 
@@ -10,6 +11,7 @@ dropped = []
 FREEZE = False
 MAX_WAITLIST = 3
 database = "enrollment_service/database/database.db"
+dynamodb = boto3.resource('dynamodb',endpoint_url='http://localhost:8000')
 
 # Connect to the database
 def get_db():
@@ -33,48 +35,88 @@ def reorder_placement(cur, total_enrolled, placement, class_id):
 
 #==========================================students==================================================
 
-
 #gets available classes for a student
 @router.get("/students/{student_id}/classes", tags=['Student']) 
-def get_available_classes(student_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
-    # Fetch student data from db
-    cursor.execute(
-        """
-        SELECT * FROM student
-        WHERE id = ?
-        """, (student_id,)
-    )
-    student_data = cursor.fetchone()
-    #Check if exist
+def get_available_classes(student_id: int):
+    # cursor = db.cursor()
+    # # Fetch student data from db
+    # cursor.execute(
+    #     """
+    #     SELECT * FROM student
+    #     WHERE id = ?
+    #     """, (student_id,)
+    # )
+    # student_data = cursor.fetchone()
+    # #Check if exist
+    # if not student_data:
+    #     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    
+    # # Execute the SQL query to retrieve available classes
+    # # If max waitlist, don't show full classes with open waitlists
+    # if student_data['waitlist_count'] >= MAX_WAITLIST:
+    #     cursor.execute("""
+    #         SELECT class.id, class.name, class.course_code, class.section_number, class.current_enroll, class.max_enroll,
+    #             department.id AS department_id, department.name AS department_name,
+    #             instructor.id AS instructor_id, instructor.name AS instructor_name
+    #         FROM class
+    #         INNER JOIN department ON class.department_id = department.id
+    #         INNER JOIN instructor ON class.instructor_id = instructor.id
+    #         WHERE class.current_enroll < class.max_enroll   
+    #     """)
+    # # Else show all open classes or full classes with open waitlists
+    # else:
+    #     cursor.execute("""
+    #         SELECT class.id, class.name, class.course_code, class.section_number, class.current_enroll, class.max_enroll,
+    #             department.id AS department_id, department.name AS department_name,
+    #             instructor.id AS instructor_id, instructor.name AS instructor_name
+    #         FROM class
+    #         INNER JOIN department ON class.department_id = department.id
+    #         INNER JOIN instructor ON class.instructor_id = instructor.id
+    #         WHERE class.current_enroll < class.max_enroll + 15   
+    #     """)
+    student_table = dynamodb.Table('student')
+    class_table = dynamodb.Table('class')
+    department_table = dynamodb.Table('department')
+    instructor_table = dynamodb.Table('instructor')
+
+    # Fetch student data
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
+    
     if not student_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
     
-    # Execute the SQL query to retrieve available classes
-    # If max waitlist, don't show full classes with open waitlists
+    # Determine the query for classes based on waitlist_count
     if student_data['waitlist_count'] >= MAX_WAITLIST:
-        cursor.execute("""
-            SELECT class.id, class.name, class.course_code, class.section_number, class.current_enroll, class.max_enroll,
-                department.id AS department_id, department.name AS department_name,
-                instructor.id AS instructor_id, instructor.name AS instructor_name
-            FROM class
-            INNER JOIN department ON class.department_id = department.id
-            INNER JOIN instructor ON class.instructor_id = instructor.id
-            WHERE class.current_enroll < class.max_enroll   
-        """)
-    # Else show all open classes or full classes with open waitlists
+        # Logic for classes with current_enroll < max_enroll
+        class_response = class_table.scan(FilterExpression='current_enroll < max_enroll')
     else:
-        cursor.execute("""
-            SELECT class.id, class.name, class.course_code, class.section_number, class.current_enroll, class.max_enroll,
-                department.id AS department_id, department.name AS department_name,
-                instructor.id AS instructor_id, instructor.name AS instructor_name
-            FROM class
-            INNER JOIN department ON class.department_id = department.id
-            INNER JOIN instructor ON class.instructor_id = instructor.id
-            WHERE class.current_enroll < class.max_enroll + 15   
-        """)
+        # Logic for classes with current_enroll < max_enroll + 15
+        class_response = class_table.scan(FilterExpression='current_enroll < max_enroll + :val', 
+                                          ExpressionAttributeValues={':val': 15})
+    
+    classes = class_response.get('Items')
 
-    class_data = cursor.fetchall()
+    # Manually join department and instructor data
+    classes_with_details = []
+    for c in classes:
+        department = department_table.get_item(Key={'id': c['department_id']}).get('Item')
+        instructor = instructor_table.get_item(Key={'id': c['instructor_id']}).get('Item')
+        class_info = {
+            'id': c['id'],
+            'name': c['name'],
+            'course_code': c['course_code'],
+            'section_number': c['section_number'],
+            'current_enroll': c['current_enroll'],
+            'max_enroll': c['max_enroll'],
+            'department_id': department['id'],
+            'department_name': department['name'],
+            'instructor_id': instructor['id'],
+            'instructor_name': instructor['name']
+        }
+        classes_with_details.append(class_info)
+
+    return {"Classes": classes_with_details}
 
     return {"Classes" : class_data}
 
