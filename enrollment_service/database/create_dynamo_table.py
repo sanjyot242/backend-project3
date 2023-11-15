@@ -591,7 +591,7 @@ def update_class_and_enrollments(class_updates, enrollments, student_update):
 # Define your updates and inserts
 class_updates = [(8, 31), (4, 33), (13, 36)]
 enrollments = [(31, 8, 1), (33, 4, 1), (36, 13, 1)]
-student_update = (1, 3)
+student_update = (1, 2)
 
 
 
