@@ -1,6 +1,8 @@
 import contextlib
 import sqlite3
 import boto3
+from boto3.dynamodb.conditions import Key, Attr
+
 from botocore.exceptions import ClientError
 from fastapi import Depends, HTTPException, APIRouter, Header, status
 from enrollment_service.database.schemas import Class
@@ -89,7 +91,7 @@ def get_available_classes(student_id: int):
     # Initialize classes list
     classes = []
     # Determine the query for classes based on waitlist_count
-    if student_data['waitlist_count'] >= MAX_WAITLIST:
+    '''if student_data['waitlist_count'] >= MAX_WAITLIST:
         print(student_data['waitlist_count'])
         # Logic for classes with current_enroll < max_enroll
         class_response = class_table.scan(FilterExpression='current_enroll < max_enroll')
@@ -100,7 +102,23 @@ def get_available_classes(student_id: int):
         all_classes = class_response.get('Items')
 
         # Filtering classes based on the condition: current_enroll < max_enroll + 15
-        classes = [c for c in all_classes if c['current_enroll'] < (c['max_enroll'] + 15)]
+        classes = [c for c in all_classes if c['current_enroll'] < (c['max_enroll'] + 15)]'''
+    
+    # Determine the query for classes based on waitlist_count
+    if student_data['waitlist_count'] >= MAX_WAITLIST:
+        # Using query with GSI - classes that are not full
+        class_response = class_table.query(
+            IndexName='AvailableSlotsIndex',
+            KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(0)
+    )
+    else:
+        # Using query with GSI - classes that can have waitlisted students
+        class_response = class_table.query(
+            IndexName='AvailableSlotsIndex',
+             KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(-15)
+        )
+
+    classes = class_response.get('Items')
 
     #joining the data 
     classes_with_details = []
@@ -606,3 +624,14 @@ def freeze_automatic_enrollment():
     else:
         FREEZE = True
         return {"message": "Automatic enrollment frozen successfully"}
+
+######Helpers#####
+def update_class_availability(dynamodb_client, class_id, max_enroll, current_enroll):
+    class_table = dynamodb_client.Table('class')
+    available_slots = max_enroll - current_enroll
+
+    class_table.update_item(
+        Key={'id': class_id},
+        UpdateExpression="SET availableSlots = :val",
+        ExpressionAttributeValues={':val': available_slots}
+    )

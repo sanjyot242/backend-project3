@@ -246,7 +246,9 @@ def create_class_table():
         AttributeDefinitions=[
             {'AttributeName': 'id', 'AttributeType': 'N'},  # Attribute type N for number
             {'AttributeName': 'department_id', 'AttributeType': 'N'},
-            {'AttributeName': 'instructor_id', 'AttributeType': 'N'}
+            {'AttributeName': 'instructor_id', 'AttributeType': 'N'},
+            {'AttributeName': 'available_slot', 'AttributeType': 'N'},
+            {'AttributeName': 'constantGSI', 'AttributeType': 'S'},
         ],
         ProvisionedThroughput={
             'ReadCapacityUnits': 10,
@@ -269,7 +271,22 @@ def create_class_table():
             {
                 'IndexName': 'InstructorIndex',
                 'KeySchema': [
+                    
                     {'AttributeName': 'instructor_id', 'KeyType': 'HASH'}
+                ],
+                'Projection': {
+                    'ProjectionType': 'ALL'
+                },
+                'ProvisionedThroughput': {
+                    'ReadCapacityUnits': 10,
+                    'WriteCapacityUnits': 10
+                }
+            },
+            {
+                'IndexName': 'AvailableSlotsIndex',
+                'KeySchema': [
+                    {'AttributeName': 'constantGSI', 'KeyType': 'HASH'},
+                    {'AttributeName': 'available_slot', 'KeyType': 'RANGE'}
                 ],
                 'Projection': {
                     'ProjectionType': 'ALL'
@@ -429,6 +446,7 @@ def insert_data_into_dynamodb(sample_classes):
         section_number = int(class_data.section_number)
         current_enroll = int(class_data.current_enroll) if class_data.current_enroll is not None else None
         max_enroll = int(class_data.max_enroll) if class_data.max_enroll is not None else None
+        available_slot = max_enroll - current_enroll
         # Put item in the DynamoDB table
         response = table.put_item(
             Item={
@@ -439,7 +457,9 @@ def insert_data_into_dynamodb(sample_classes):
                 'current_enroll': current_enroll,
                 'max_enroll': max_enroll,
                 'department_id': department_id,
-                'instructor_id': instructor_id
+                'instructor_id': instructor_id,
+                'available_slot': available_slot,
+                'constantGSI':"ALL"
             }
         )
         print("Inserted:", response)    
