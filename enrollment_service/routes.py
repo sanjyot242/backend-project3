@@ -1,6 +1,9 @@
 import contextlib
 import sqlite3
-import redis
+import boto3
+from boto3.dynamodb.conditions import Key, Attr
+
+from botocore.exceptions import ClientError
 from fastapi import Depends, HTTPException, APIRouter, Header, status
 from enrollment_service.database.schemas import Class
 
@@ -10,6 +13,7 @@ dropped = []
 FREEZE = False
 MAX_WAITLIST = 3
 database = "enrollment_service/database/database.db"
+dynamodb = boto3.resource('dynamodb',endpoint_url='http://localhost:8000')
 redis_client = redis.StrictRedis(host='localhost', port=6379, db =0, decode_responses=True)
 
 # Connect to the database
@@ -34,11 +38,10 @@ def reorder_placement(cur, total_enrolled, placement, class_id):
 
 #==========================================students==================================================
 
-
 #gets available classes for a student
 @router.get("/students/{student_id}/classes", tags=['Student']) 
-def get_available_classes(student_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+def get_available_classes(student_id: int):
+    '''cursor = db.cursor()
     # Fetch student data from db
     cursor.execute(
         """
@@ -73,17 +76,76 @@ def get_available_classes(student_id: int, db: sqlite3.Connection = Depends(get_
             INNER JOIN department ON class.department_id = department.id
             INNER JOIN instructor ON class.instructor_id = instructor.id
             WHERE class.current_enroll < class.max_enroll + 15   
-        """)
+        """)'''
+    student_table = dynamodb.Table('student')
+    class_table = dynamodb.Table('class')
+    department_table = dynamodb.Table('department')
+    instructor_table = dynamodb.Table('instructor')
 
-    class_data = cursor.fetchall()
+    # Fetch student data
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
+    
+    if not student_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    
+    # Initialize classes list
+    classes = []
+    # Determine the query for classes based on waitlist_count
+    '''if student_data['waitlist_count'] >= MAX_WAITLIST:
+        print(student_data['waitlist_count'])
+        # Logic for classes with current_enroll < max_enroll
+        class_response = class_table.scan(FilterExpression='current_enroll < max_enroll')
+        classes = class_response.get('Items')
+    else:
+        print("Inside else")
+        class_response = class_table.scan()
+        all_classes = class_response.get('Items')
 
-    return {"Classes" : class_data}
+        # Filtering classes based on the condition: current_enroll < max_enroll + 15
+        classes = [c for c in all_classes if c['current_enroll'] < (c['max_enroll'] + 15)]'''
+    
+    # Determine the query for classes based on waitlist_count
+    if student_data['waitlist_count'] >= MAX_WAITLIST:
+        # Using query with GSI - classes that are not full
+        class_response = class_table.query(
+            IndexName='AvailableSlotsIndex',
+            KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(0)
+    )
+    else:
+        # Using query with GSI - classes that can have waitlisted students
+        class_response = class_table.query(
+            IndexName='AvailableSlotsIndex',
+            KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(-15)
+        )
 
+    classes = class_response.get('Items')
+
+    #joining the data 
+    classes_with_details = []
+    for c in classes:
+        department = department_table.get_item(Key={'id': c['department_id']}).get('Item')
+        instructor = instructor_table.get_item(Key={'id': c['instructor_id']}).get('Item')
+        class_info = {
+            'id': c['id'],
+            'name': c['name'],
+            'course_code': c['course_code'],
+            'section_number': c['section_number'],
+            'current_enroll': c['current_enroll'],
+            'max_enroll': c['max_enroll'],
+            'department_id': department['id'],
+            'department_name': department['name'],
+            'instructor_id': instructor['id'],
+            'instructor_name': instructor['name']
+        }
+        classes_with_details.append(class_info)
+
+    return {"Classes": classes_with_details}
 
 #gets currently enrolled classes for a student
 @router.get("/students/{student_id}/enrolled", tags=['Student'])
 def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+    '''cursor = db.cursor()
     
     # Check if the student exists in the database
     cursor.execute("SELECT * FROM student WHERE id = ?", (student_id,))
@@ -101,12 +163,65 @@ def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_
             JOIN department ON class.department_id = department.id
             WHERE student.id = ? AND class.current_enroll < class.max_enroll
         """, (student_id,))
-    student_data = cursor.fetchall()
-    
+    student_data = cursor.fetchall()'''
+    student_table = dynamodb.Table('student')
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
+    enrollment_table = dynamodb.Table('enrollment')
+    department_table = dynamodb.Table('department')
+    class_table = dynamodb.Table('class')
+
     if not student_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not enrolled in any classes")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+
+   
+
+    # Query DynamoDB
+    response = enrollment_table.query(
+    KeyConditionExpression=Key('student_id').eq(student_id)  
+    )
+
+    print(response)
+
     
-    return {"Enrolled": student_data}
+
+# An empty list to store the class details
+    enrolled_classes = []
+
+    # Loop through the items in the response
+    for item in response['Items']:
+        class_id = item['class_id']
+        # Query the class table for details on each class_id
+        class_response = class_table.get_item(
+            Key={'id': class_id}  # Assuming 'id' is the primary key for the Class table
+        )
+        
+        if 'Item' in class_response:
+            enrolled_class = class_response['Item']
+            # Add the details to the enrolled_classes list, restructuring as needed
+            if enrolled_class.get('current_enroll') < enrolled_class.get('max_enroll'):
+                
+                department = department_table.get_item(Key={'id': enrolled_class['department_id']}).get('Item')
+                enrolled_classes.append({
+                    "id": enrolled_class.get('id'),
+                    "department_name": department.get('name'),
+                    "course_code": enrolled_class.get('course_code'),
+                    "section_number": enrolled_class.get('section_number'),
+                    "class_name": enrolled_class.get('name'),
+                    "current_enroll": enrolled_class.get('current_enroll')
+                })
+
+    # Construct the final response
+    final_response = {"Enrolled": enrolled_classes}
+
+
+
+
+
+    '''if not student_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not enrolled in any classes")'''
+    
+    return  final_response
 
 
 # Enrolls a student into an available class,
@@ -563,3 +678,14 @@ def freeze_automatic_enrollment():
     else:
         FREEZE = True
         return {"message": "Automatic enrollment frozen successfully"}
+
+######Helpers#####
+def update_class_availability(dynamodb_client, class_id, max_enroll, current_enroll):
+    class_table = dynamodb_client.Table('class')
+    available_slots = max_enroll - current_enroll
+
+    class_table.update_item(
+        Key={'id': class_id},
+        UpdateExpression="SET availableSlots = :val",
+        ExpressionAttributeValues={':val': available_slots}
+    )
