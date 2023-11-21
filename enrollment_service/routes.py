@@ -6,7 +6,7 @@ from boto3.dynamodb.conditions import Key, Attr
 from botocore.exceptions import ClientError
 from fastapi import Depends, HTTPException, APIRouter, Header, status
 from enrollment_service.database.schemas import Class
-
+import redis
 router = APIRouter()
 dropped = []
 
