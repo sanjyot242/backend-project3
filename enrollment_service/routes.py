@@ -115,7 +115,7 @@ def get_available_classes(student_id: int):
         # Using query with GSI - classes that can have waitlisted students
         class_response = class_table.query(
             IndexName='AvailableSlotsIndex',
-             KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(-15)
+            KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(-15)
         )
 
     classes = class_response.get('Items')
@@ -144,7 +144,7 @@ def get_available_classes(student_id: int):
 #gets currently enrolled classes for a student
 @router.get("/students/{student_id}/enrolled", tags=['Student'])
 def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+    '''cursor = db.cursor()
     
     # Check if the student exists in the database
     cursor.execute("SELECT * FROM student WHERE id = ?", (student_id,))
@@ -162,12 +162,65 @@ def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_
             JOIN department ON class.department_id = department.id
             WHERE student.id = ? AND class.current_enroll < class.max_enroll
         """, (student_id,))
-    student_data = cursor.fetchall()
-    
+    student_data = cursor.fetchall()'''
+    student_table = dynamodb.Table('student')
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
+    enrollment_table = dynamodb.Table('enrollment')
+    department_table = dynamodb.Table('department')
+    class_table = dynamodb.Table('class')
+
     if not student_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not enrolled in any classes")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+
+   
+
+    # Query DynamoDB
+    response = enrollment_table.query(
+    KeyConditionExpression=Key('student_id').eq(student_id)  
+    )
+
+    print(response)
+
     
-    return {"Enrolled": student_data}
+
+# An empty list to store the class details
+    enrolled_classes = []
+
+    # Loop through the items in the response
+    for item in response['Items']:
+        class_id = item['class_id']
+        # Query the class table for details on each class_id
+        class_response = class_table.get_item(
+            Key={'id': class_id}  # Assuming 'id' is the primary key for the Class table
+        )
+        
+        if 'Item' in class_response:
+            enrolled_class = class_response['Item']
+            # Add the details to the enrolled_classes list, restructuring as needed
+            if enrolled_class.get('current_enroll') < enrolled_class.get('max_enroll'):
+                
+                department = department_table.get_item(Key={'id': enrolled_class['department_id']}).get('Item')
+                enrolled_classes.append({
+                    "id": enrolled_class.get('id'),
+                    "department_name": department.get('name'),
+                    "course_code": enrolled_class.get('course_code'),
+                    "section_number": enrolled_class.get('section_number'),
+                    "class_name": enrolled_class.get('name'),
+                    "current_enroll": enrolled_class.get('current_enroll')
+                })
+
+    # Construct the final response
+    final_response = {"Enrolled": enrolled_classes}
+
+
+
+
+
+    '''if not student_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not enrolled in any classes")'''
+    
+    return  final_response
 
 
 # Enrolls a student into an available class,

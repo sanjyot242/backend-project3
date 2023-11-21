@@ -407,11 +407,11 @@ def create_enrollment_table():
     TableName= "enrollment",
         KeySchema= [
             {
-                'AttributeName': 'class_id',
+                'AttributeName': 'student_id',
                 'KeyType': 'HASH'  # Partition key
             },
             {
-                'AttributeName': 'student_id',
+                'AttributeName': 'class_id',
                 'KeyType': 'RANGE'  # Sort key
             }
         ],
