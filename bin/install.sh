@@ -29,6 +29,9 @@ sudo apt install -y httpie
 # Install pip for Python 3
 sudo apt install -y python3-pip
 
+# Install AWS cli
+sudo apt install --yes openjdk-19-jre-headless
+
 # Install required libaries for the project
 pip3 install -r requirements.txt
 
