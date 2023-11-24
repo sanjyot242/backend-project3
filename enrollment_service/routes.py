@@ -85,7 +85,7 @@ def get_available_classes(student_id: int):
     department_table = dynamodb.Table('department')
     instructor_table = dynamodb.Table('instructor')
 
-    # Fetch student data
+    #get student data from student table 
     student_response = student_table.get_item(Key={'id': student_id})
     student_data = student_response.get('Item')
     
@@ -94,7 +94,6 @@ def get_available_classes(student_id: int):
     
     # Initialize classes list
     classes = []
-    # Determine the query for classes based on waitlist_count
     '''if student_data['waitlist_count'] >= MAX_WAITLIST:
         print(student_data['waitlist_count'])
         # Logic for classes with current_enroll < max_enroll
@@ -108,15 +107,15 @@ def get_available_classes(student_id: int):
         # Filtering classes based on the condition: current_enroll < max_enroll + 15
         classes = [c for c in all_classes if c['current_enroll'] < (c['max_enroll'] + 15)]'''
     
-    # Determine the query for classes based on waitlist_count
+    #check waitlist count for the student 
     if student_data['waitlist_count'] >= MAX_WAITLIST:
-        # Using query with GSI - classes that are not full
+        
         class_response = class_table.query(
             IndexName='AvailableSlotsIndex',
             KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(0)
     )
     else:
-        # Using query with GSI - classes that can have waitlisted students
+        
         class_response = class_table.query(
             IndexName='AvailableSlotsIndex',
             KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(-15)
@@ -124,7 +123,7 @@ def get_available_classes(student_id: int):
 
     classes = class_response.get('Items')
 
-    #joining the data 
+    #joining the data to get desired response 
     classes_with_details = []
     for c in classes:
         department = department_table.get_item(Key={'id': c['department_id']}).get('Item')
@@ -177,33 +176,29 @@ def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_
     if not student_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
 
-   
-
-    # Query DynamoDB
     response = enrollment_table.query(
     KeyConditionExpression=Key('student_id').eq(student_id)  
     )
 
-    print(response)
+    #print(response)
 
 
 
-# An empty list to store the class details
+#creating list to store class details 
     enrolled_classes = []
 
-    # Loop through the items in the response
+    # Loop through the class_id in response 
     for item in response['Items']:
         class_id = item['class_id']
-        # Query the class table for details on each class_id
+        #get deatails of particiular classes in class_response
         class_response = class_table.get_item(
-            Key={'id': class_id}  # Assuming 'id' is the primary key for the Class table
+            Key={'id': class_id}  
         )
         
         if 'Item' in class_response:
             enrolled_class = class_response['Item']
-            # Add the details to the enrolled_classes list, restructuring as needed
+            #logic to only show classes which the student is enrolled in 
             if enrolled_class.get('current_enroll') < enrolled_class.get('max_enroll'):
-                
                 department = department_table.get_item(Key={'id': enrolled_class['department_id']}).get('Item')
                 enrolled_classes.append({
                     "id": enrolled_class.get('id'),
@@ -221,8 +216,8 @@ def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_
 
 
 
-    '''if not student_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not enrolled in any classes")'''
+    if not final_response:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not enrolled in any classes")
     
     return  final_response
 
@@ -231,8 +226,82 @@ def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_
 # or will automatically put the student on an open waitlist for a full class
 @router.post("/students/{student_id}/classes/{class_id}/enroll", tags=['Student'])
 def enroll_student_in_class(student_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+    student_table = dynamodb.Table('student')
+    class_table = dynamodb.Table('class')
+    enrollment_table = dynamodb.Table('enrollment')
+    #get student data from student table 
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
+    
+    class_response = class_table.get_item(Key={'id': class_id} )
+    class_data = class_response.get('Item')
+    
+    print(student_data)
+    print(class_data)
+    if not student_data or not class_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student or Class not found")
 
+    #check if student is already enrolled in the class
+    enrollment_response = enrollment_table.query(
+        KeyConditionExpression = boto3.dynamodb.conditions.Key('student_id').eq(student_id),
+        ProjectionExpression='class_id'
+        )
+    enrollment_data = enrollment_response["Items"]
+
+    
+    exists = any(item['class_id'] == class_id for item in enrollment_data)
+    
+    if(exists):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student is already enrolled or waitlisted in this class")
+    
+    
+    #if class is not full add to enrollment
+    if class_data['current_enroll'] >= class_data['max_enroll']:
+        if not FREEZE:
+            #add to waitlist if place exists in waitlist 
+            waitlist_count = get_waitlist_count(student_id=student_data['id'], redis_client=redis_client)
+            if waitlist_count < MAX_WAITLIST:
+                increment_wailist_count(student_id=student_data['id'], redis_client=redis_client)
+                return {"message": "Student added to the waitlist"}
+            else:
+                return {"message": "Unable to add student to waitlist due to already having max number of waitlists"}
+        else:
+            return {"message": "Unable to add student to waitlist due to administrative freeze"}
+    
+    
+    
+
+    #increase enrollemt number in class db 
+    response = class_table.update_item(
+    Key={
+        'id': class_id
+    },
+    UpdateExpression="SET current_enroll = current_enroll + :inc",
+    ExpressionAttributeValues={
+        ':inc': 1
+    },
+    ReturnValues="UPDATED_NEW"
+    )
+    print(response)
+    current_enrolled = response['Attributes']['current_enroll']
+    #add student to enrolled class 
+    data_item = {
+    'student_id': student_id,  # Assuming 'student_id' is the primary key
+    'placement': current_enrolled,
+    'class_id': class_id
+    }
+    enrollment_table.put_item(Item=data_item)
+    
+    #fecth updated class and display details 
+    class_response = class_table.get_item(Key={'id': class_id} )
+    class_data = class_response.get('Item')
+
+            
+
+    return class_data
+        
+        
+    '''cursor = db.cursor()
     # Check if the student exists in the database
     cursor.execute("SELECT * FROM student WHERE id = ?", (student_id,))
     student_data = cursor.fetchone()
@@ -297,8 +366,8 @@ def enroll_student_in_class(student_id: int, class_id: int, db: sqlite3.Connecti
     # Fetch the updated class data from the database
     cursor.execute("SELECT * FROM class WHERE id = ?", (class_id,))
     updated_class_data = cursor.fetchone()
-
-    return updated_class_data
+   
+    return updated_class_data'''
 
 
 # Have a student drop a class they're enrolled in
