@@ -1,11 +1,14 @@
 import contextlib
 import sqlite3
-import boto3
-from boto3.dynamodb.conditions import Key, Attr
 
+import boto3
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
-from fastapi import Depends, HTTPException, APIRouter, Header, status
+from fastapi import APIRouter, Depends, HTTPException, Header, status
+import redis
+
 from enrollment_service.database.schemas import Class
+from enrollment_service.redis_query import get_waitlist_count, increment_wailist_count , decrement_wailist_count
 
 router = APIRouter()
 dropped = []
@@ -14,6 +17,7 @@ FREEZE = False
 MAX_WAITLIST = 3
 database = "enrollment_service/database/database.db"
 dynamodb = boto3.resource('dynamodb',endpoint_url='http://localhost:8000')
+redis_client = redis.StrictRedis(host='localhost', port=6379, db =0, decode_responses=True)
 
 # Connect to the database
 def get_db():
@@ -182,7 +186,7 @@ def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_
 
     print(response)
 
-    
+
 
 # An empty list to store the class details
     enrolled_classes = []
@@ -255,10 +259,16 @@ def enroll_student_in_class(student_id: int, class_id: int, db: sqlite3.Connecti
     # freeze is in place
     if class_data['current_enroll'] >= class_data['max_enroll']:
         if not FREEZE:
-            if student_data['waitlist_count'] < MAX_WAITLIST:
-                cursor.execute("""UPDATE student 
-                                SET waitlist_count = waitlist_count + 1
-                                WHERE id = ?""",(student_id,))
+            # if student_data['waitlist_count'] < MAX_WAITLIST:
+            #     cursor.execute("""UPDATE student 
+            #                     SET waitlist_count = waitlist_count + 1
+            #                     WHERE id = ?""",(student_id,))
+            #     return {"message": "Student added to the waitlist"}
+            # else:
+            #     return {"message": "Unable to add student to waitlist due to already having max number of waitlists"}
+            waitlist_count = get_waitlist_count(student_id=student_data['id'], redis_client=redis_client)
+            if waitlist_count < MAX_WAITLIST:
+                increment_wailist_count(student_id=student_data['id'], redis_client=redis_client)
                 return {"message": "Student added to the waitlist"}
             else:
                 return {"message": "Unable to add student to waitlist due to already having max number of waitlists"}
@@ -368,11 +378,12 @@ def view_waiting_list(student_id: int, db: sqlite3.Connection = Depends(get_db))
     cursor = db.cursor()
 
     # Retrieve waitlist entries for the specified student from the database
-    cursor.execute("SELECT waitlist_count FROM student WHERE id = ? AND waitlist_count > 0", (student_id,))
-    waitlist_data = cursor.fetchall()
+    # cursor.execute("SELECT waitlist_count FROM student WHERE id = ? AND waitlist_count > 0", (student_id,))
+    # waitlist_data = cursor.fetchall()
+    waitlist_data = get_waitlist_count(student_id=student_id, redis_client=redis_client)
 
     # Check if exist
-    if not waitlist_data:
+    if waitlist_data == 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student is not on a waitlist")  
 
     # fetch all relevant waitlist information for student
@@ -408,10 +419,11 @@ def remove_from_waitlist(student_id: int, class_id: int, db: sqlite3.Connection 
     if not student_data or not class_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student or Class not found")
     
-    cursor.execute("SELECT * FROM student WHERE id = ? AND waitlist_count > 0", (student_id,))
-    student_data = cursor.fetchone()
+    # cursor.execute("SELECT * FROM student WHERE id = ? AND waitlist_count > 0", (student_id,))
+    # student_data = cursor.fetchone()
+    student_data = get_waitlist_count(student_id=student_id, redis_client=redis_client)
 
-    if not student_data:
+    if student_data == 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student is not on the waitlist")
 
     cursor.execute("""SELECT enrollment.placement, class.current_enroll
@@ -427,8 +439,9 @@ def remove_from_waitlist(student_id: int, class_id: int, db: sqlite3.Connection 
 
     # Delete student from waitlist enrollment
     cursor.execute("DELETE FROM enrollment WHERE student_id = ? AND class_id = ?", (student_id, class_id))
-    cursor.execute("""UPDATE student SET waitlist_count = waitlist_count - 1
-                    WHERE id = ?""", (student_id,))
+    # cursor.execute("""UPDATE student SET waitlist_count = waitlist_count - 1
+    #                 WHERE id = ?""", (student_id,))
+    decrement_wailist_count(student_id = student_id, redis_client=redis_client)
     
     # Reorder enrollment placements
     reorder_placement(cursor, waitlist_entry['current_enroll'], waitlist_entry['placement'], class_id)
