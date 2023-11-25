@@ -11,7 +11,7 @@
             "cwd": "${workspaceFolder}",
             "python": "${workspaceFolder}/.venv/bin/python",
             "program": "${workspaceFolder}/.venv/bin/uvicorn",
-            "args": ["enrollment_service.enrollment_service:app", "--host", "0.0.0.0" ,"--port", "8000"],
+            "args": ["enrollment_service.enrollment_service:app", "--host", "0.0.0.0" ,"--port", "8001"],
             "justMyCode": true
         }
     ]
