@@ -3,7 +3,6 @@ import sqlite3
 import boto3
 import redis
 from boto3.dynamodb.conditions import Key, Attr
-
 from botocore.exceptions import ClientError
 from fastapi import Depends, HTTPException, APIRouter, Header, status
 from enrollment_service.database.schemas import Class
@@ -98,7 +97,7 @@ def get_available_classes(student_id: int):
 
 # gets currently enrolled classes for a student
 @router.get("/students/{student_id}/enrolled", tags=['Student'])
-def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_db)):
+def view_enrolled_classes(student_id: int):
     student_table = dynamodb.Table('student')
     student_response = student_table.get_item(Key={'id': student_id})
     student_data = student_response.get('Item')
@@ -148,7 +147,7 @@ def view_enrolled_classes(student_id: int, db: sqlite3.Connection = Depends(get_
 # Enrolls a student into an available class,
 # or will automatically put the student on an open waitlist for a full class
 @router.post("/students/{student_id}/classes/{class_id}/enroll", tags=['Student'])
-def enroll_student_in_class(student_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
+def enroll_student_in_class(student_id: int, class_id: int):
     student_table = dynamodb.Table('student')
     class_table = dynamodb.Table('class')
     enrollment_table = dynamodb.Table('enrollment')
@@ -186,7 +185,7 @@ def enroll_student_in_class(student_id: int, class_id: int, db: sqlite3.Connecti
                 increment_wailist_count(student_id=student_data['id'], redis_client=redis_client)
                 return {"message": "Student added to the waitlist"}
             else:
-                return {"message": "Unable to add student to waitlist due to already having max number of waitlists"}
+                return {"message": "Unable to add student to waitlist due to already having max number of wait-lists"}
         else:
             return {"message": "Unable to add student to waitlist due to administrative freeze"}
 
@@ -266,6 +265,7 @@ def drop_student_from_class(class_id: int, student_id: int = Header(None, alias=
 
 
 # Get all classes with waiting lists
+# TODO: Update to use redis
 @router.get("/waitlist/classes", tags=['Waitlist'])
 def view_all_class_waitlists(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()  
@@ -284,12 +284,13 @@ def view_all_class_waitlists(db: sqlite3.Connection = Depends(get_db)):
     waitlist_data = cursor.fetchall()
     # Check if exist
     if not waitlist_data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No classes have waitlists")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No classes have wait-lists")
 
     return {"Waitlists": waitlist_data}
 
 
 # Get all waiting lists for a student
+# TODO: Update to use redis
 @router.get("/waitlist/students/{student_id}", tags=['Waitlist'])
 def view_waiting_list(student_id: int, db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -322,6 +323,7 @@ def view_waiting_list(student_id: int, db: sqlite3.Connection = Depends(get_db))
 
 
 # remove a student from a waiting list
+# TODO: Update to use redis
 @router.put("/waitlist/students/{student_id}/classes/{class_id}/drop", tags=['Waitlist'])
 def remove_from_waitlist(student_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -369,6 +371,7 @@ def remove_from_waitlist(student_id: int, class_id: int, db: sqlite3.Connection 
 
 # Get a list of students on a waitlist for a particular class that
 # a specific instructor teaches
+# TODO: Update to use redis
 @router.get("/waitlist/instructors/{instructor_id}/classes/{class_id}", tags=['Waitlist'])
 def view_current_waitlist(instructor_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -428,8 +431,6 @@ def get_instructor_enrollment(instructor_id: int, class_id: int):
 
     student_data = []
 
-    # TODO: Clean up endpoint return object
-
     for student in enrollment_data['Items']:
         student_name = student_table.get_item(Key={'id': student['student_id']}).get('Item').get('name')
         student_data.append({'name': student_name, 'placement': student['placement']})
@@ -441,7 +442,7 @@ def get_instructor_enrollment(instructor_id: int, class_id: int):
 
 # View list of students who have dropped the class
 @router.get("/instructors/{instructor_id}/classes/{class_id}/drop", tags=['Instructor'])
-def get_instructor_dropped(instructor_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
+def get_instructor_dropped(instructor_id: int, class_id: int):
     student_table = dynamodb.Table('student')
     dropped_table = dynamodb.Table('dropped')
 
@@ -462,16 +463,9 @@ def get_instructor_dropped(instructor_id: int, class_id: int, db: sqlite3.Connec
 # Instructor administratively drops student
 @router.post("/instructors/{instructor_id}/classes/{class_id}/students/{student_id}/drop", tags=['Instructor'])
 def instructor_drop_class(instructor_id: int, class_id: int, student_id: int):
-    student_table = dynamodb.Table('student')
     enrollment_table = dynamodb.Table('enrollment')
 
-    # Check if student exists
-    student_response = student_table.get_item(Key={'id': student_id})
-    student_data = student_response.get('Item')
-
-    if not student_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
-
+    check_student_exists(student_id)
     check_instructor_or_class_exist(instructor_id, class_id)
 
     # Check if student is in the class
@@ -494,7 +488,7 @@ def instructor_drop_class(instructor_id: int, class_id: int, student_id: int):
 
 # Create a new class
 @router.post("/registrar/classes/", tags=['Registrar'])
-def create_class(class_data: Class, db: sqlite3.Connection = Depends(get_db)):
+def create_class(class_data: Class):
     class_table = dynamodb.Table('class')
     class_response = class_table.get_item(Key={'id': class_data.id}).get('Item')
     available_slot = class_data.max_enroll - class_data.current_enroll
@@ -525,10 +519,7 @@ def create_class(class_data: Class, db: sqlite3.Connection = Depends(get_db)):
 @router.delete("/registrar/classes/{class_id}", tags=['Registrar'])
 def remove_class(class_id: int):
     class_table = dynamodb.Table('class')
-    class_response = class_table.get_item(Key={'id': class_id}).get('Item')
-
-    if not class_response:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
+    check_class_exists(class_id)
 
     class_table.delete_item(Key={'id': class_id})
 
@@ -611,3 +602,11 @@ def check_instructor_exists(instructor_id: int):
     instructor_data = instructor_response.get('Item')
     if not instructor_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instructor doesnt exist")
+
+
+def check_student_exists(student_id: int):
+    student_table = dynamodb.Table('student')
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
+    if not student_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student doesnt exist")
