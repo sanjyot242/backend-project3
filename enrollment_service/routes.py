@@ -497,48 +497,42 @@ def instructor_drop_class(instructor_id: int, class_id: int, student_id: int):
 def create_class(class_data: Class, db: sqlite3.Connection = Depends(get_db)):
     class_table = dynamodb.Table('class')
     class_response = class_table.get_item(Key={'id': class_data.id}).get('Item')
+    available_slot = class_data.max_enroll - class_data.current_enroll
 
     # Check if class id exists
     if class_response:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Class id already exists")
+    else:
+        class_table.put_item(
+            Item={
+                'id': class_data.id,
+                'name': class_data.name,
+                'course_code': class_data.course_code,
+                'section_number': class_data.section_number,
+                'current_enroll': class_data.current_enroll,
+                'max_enroll': class_data.max_enroll,
+                'department_id': class_data.department_id,
+                'instructor_id': class_data.instructor_id,
+                'available_slot': available_slot,
+                'constantGSI': "ALL"
+            }
+        )
 
-    available_slot = class_data.max_enroll - class_data.current_enroll
-
-    class_table.put_item(
-        Item={
-            'id': class_data.id,
-            'name': class_data.name,
-            'course_code': class_data.course_code,
-            'section_number': class_data.section_number,
-            'current_enroll': class_data.current_enroll,
-            'max_enroll': class_data.max_enroll,
-            'department_id': class_data.department_id,
-            'instructor_id': class_data.instructor_id,
-            'available_slot': available_slot,
-            'constantGSI': "ALL"
-        }
-    )
-
-    return {"http_status_code": status.HTTP_201_CREATED, "http_body": "created"}
+    return {"http_status_code": status.HTTP_201_CREATED, "http_body": "class created"}
 
 
 # Remove a class
 @router.delete("/registrar/classes/{class_id}", tags=['Registrar'])
 def remove_class(class_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+    class_table = dynamodb.Table('class')
+    class_response = class_table.get_item(Key={'id': class_id}).get('Item')
 
-    # Check if the class exists in the database
-    cursor.execute("SELECT * FROM class WHERE id = ?", (class_id,))
-    target_class_data = cursor.fetchone()
-
-    if not target_class_data:
+    if not class_response:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
 
-    # Delete the class from the database
-    cursor.execute("DELETE FROM class WHERE id = ?", (class_id,))
-    db.commit()
+    class_table.delete_item(Key={'id': class_id})
 
-    return {"message": "Class removed successfully"}
+    return {"http_status_code": status.HTTP_201_CREATED, "http_body": "class deleted"}
 
 
 # Change the assigned instructor for a class
