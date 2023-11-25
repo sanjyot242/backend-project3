@@ -106,10 +106,9 @@ def get_available_classes(student_id: int):
 
         # Filtering classes based on the condition: current_enroll < max_enroll + 15
         classes = [c for c in all_classes if c['current_enroll'] < (c['max_enroll'] + 15)]'''
-    
+    student_waitlist_count = get_waitlist_count(student_id=student_id, redis_client=redis_client)
     #check waitlist count for the student 
-    if student_data['waitlist_count'] >= MAX_WAITLIST:
-        
+    if student_waitlist_count >= MAX_WAITLIST:
         class_response = class_table.query(
             IndexName='AvailableSlotsIndex',
             KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(0)
