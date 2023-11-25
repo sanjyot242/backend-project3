@@ -523,7 +523,7 @@ def create_class(class_data: Class, db: sqlite3.Connection = Depends(get_db)):
 
 # Remove a class
 @router.delete("/registrar/classes/{class_id}", tags=['Registrar'])
-def remove_class(class_id: int, db: sqlite3.Connection = Depends(get_db)):
+def remove_class(class_id: int):
     class_table = dynamodb.Table('class')
     class_response = class_table.get_item(Key={'id': class_id}).get('Item')
 
@@ -537,25 +537,18 @@ def remove_class(class_id: int, db: sqlite3.Connection = Depends(get_db)):
 
 # Change the assigned instructor for a class
 @router.put("/registrar/classes/{class_id}/instructors/{instructor_id}", tags=['Registrar'])
-def change_instructor(class_id: int, instructor_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+def change_instructor(class_id: int, instructor_id: int):
+    check_class_exists(class_id)
+    check_instructor_exists(instructor_id)
 
-    cursor.execute("SELECT * FROM class WHERE id = ?", (class_id,))
-    target_class_data = cursor.fetchone()
+    class_table = dynamodb.Table('class')
+    class_table.update_item(
+        Key={'id': class_id},
+        UpdateExpression="SET instructor_id = :i",
+        ExpressionAttributeValues={":i": instructor_id}
+    )
 
-    if not target_class_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
-
-    cursor.execute("SELECT * FROM instructor WHERE id = ?", (instructor_id,))
-    instructor_data = cursor.fetchone()
-
-    if not instructor_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instructor not found")
-
-    cursor.execute("UPDATE class SET instructor_id = ? WHERE id = ?", (instructor_id, class_id))
-    db.commit()
-
-    return {"message": "Instructor changed successfully"}
+    return {"http_status_code": status.HTTP_201_CREATED, "http_body": "instructor changed"}
 
 
 # Freeze enrollment for classes
@@ -602,3 +595,19 @@ def check_instructor_or_class_exist(instructor_id: int, class_id: int):
     # Make sure the class and instructor match
     if class_data['instructor_id'] != instructor_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instructor doesn't teach class selected")
+
+
+def check_class_exists(class_id: int):
+    class_table = dynamodb.Table('class')
+    class_response = class_table.get_item(Key={'id': class_id}).get('Item')
+
+    if not class_response:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
+
+
+def check_instructor_exists(instructor_id: int):
+    instructor_table = dynamodb.Table('instructor')
+    instructor_response = instructor_table.get_item(Key={'id': instructor_id})
+    instructor_data = instructor_response.get('Item')
+    if not instructor_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instructor doesnt exist")
