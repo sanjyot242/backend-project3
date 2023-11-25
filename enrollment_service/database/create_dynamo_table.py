@@ -654,6 +654,9 @@ def create_enrollment_table():
             {
                 'AttributeName': 'student_id',
                 'AttributeType': 'N'  # Number
+            },{
+                'AttributeName': 'placement',
+                'AttributeType': 'N'  # Number
             }
             # Additional attributes can be defined here if needed for secondary indexes
         ],
@@ -669,7 +672,7 @@ def create_enrollment_table():
                     'KeyType': 'HASH'
                 },
                 {
-                    'AttributeName': 'student_id',
+                    'AttributeName': 'placement',
                     'KeyType': 'RANGE'
                 }
             ],

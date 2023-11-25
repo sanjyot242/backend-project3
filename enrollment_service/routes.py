@@ -234,7 +234,7 @@ def enroll_student_in_class(student_id: int, class_id: int):
 # Have a student drop a class they're enrolled in
 @router.delete("/students/classes/{class_id}", tags=['Students drop their own classes'])
 def drop_student_from_class(class_id: int, student_id: int = Header(None, alias="x-cwid"), db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+    '''cursor = db.cursor()
 
     # check if exist
     cursor.execute("SELECT * FROM student WHERE id = ?", (student_id,))
@@ -271,9 +271,72 @@ def drop_student_from_class(class_id: int, student_id: int = Header(None, alias=
     # Fetch data to return
     cursor.execute("""SELECT * FROM dropped
                     WHERE class_id = ? and student_id = ?""",(class_id, student_id))
-    dropped_data = cursor.fetchone() 
-    return dropped_data
+    dropped_data = cursor.fetchone()'''
+    student_table = dynamodb.Table('student')
+    class_table = dynamodb.Table('class')
+    enrollment_table = dynamodb.Table('enrollment')
+    # get student data from student table
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
+    
+    class_response = class_table.get_item(Key={'id': class_id})
+    class_data = class_response.get('Item')
+    dropped_table = dynamodb.Table('dropped')
+    print(student_data)
+    print(class_data)
+    if not student_data or not class_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student or Class not found")
 
+
+     # check if student is already enrolled in the class
+    enrollment_response = enrollment_table.query(
+        KeyConditionExpression=boto3.dynamodb.conditions.Key('student_id').eq(student_id),
+    )
+    enrollment_data = enrollment_response["Items"]
+
+    waitlist_data = None
+    for enrollment in enrollment_data:
+        # For each enrollment, get the class details
+        class_response = class_table.get_item(
+            Key={'id': enrollment['class_id']}
+        )
+        class_item = class_response.get('Item')
+
+        if class_item and enrollment['placement'] > class_item['max_enroll']:
+            #get 
+            waitlist_data = {'enrollment': enrollment, 'class': class_item}
+            break  
+
+    if not enrollment_data and not waitlist_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student is not enrolled in the class")
+    
+    enrollment_table.delete_item(
+        Key={
+            'student_id': student_id,
+            'class_id': class_id
+        }
+    )
+    reorder_placement_dynamodb(enrollment['placement'],class_id)
+
+
+    dropped_table.put_item(
+        Item={
+            'class_id': class_id,
+            'student_id': student_id
+        }
+    )
+
+    response = dropped_table.get_item(
+        Key={
+            'class_id': class_id,
+            'student_id': student_id
+        }
+    )
+
+    # Extract the item from the response
+    dropped_data = response.get('Item', None)
+
+    return dropped_data
 
 #==========================================wait list========================================== 
 
@@ -624,3 +687,38 @@ def check_student_exists(student_id: int):
     student_data = student_response.get('Item')
     if not student_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student doesnt exist")
+
+def reorder_placement_dynamodb(placement, class_id):
+    enrollment_table = dynamodb.Table('enrollment')
+    class_table = dynamodb.Table('class')
+
+    # Query to get all enrollments for the class with placement greater than the specified placement
+    response = enrollment_table.query(
+        IndexName='ClassIndex',  # Replace with your GSI name
+        KeyConditionExpression=Key('class_id').eq(class_id) & Key('placement').gt(placement)
+    )
+    items = response['Items']
+
+    # Update placements
+    for item in items:
+        new_placement = item['placement'] - 1
+        enrollment_table.update_item(
+            Key={
+                'enrollment_id': item['enrollment_id']  # Assume 'enrollment_id' is the primary key
+            },
+            UpdateExpression='SET placement = :val',
+            ExpressionAttributeValues={
+                ':val': new_placement
+            }
+        )
+
+    # Decrement current enrollment in the class table
+    class_table.update_item(
+        Key={
+            'id': class_id  
+        },
+        UpdateExpression='ADD current_enroll :dec',
+        ExpressionAttributeValues={
+            ':dec': -1
+        }
+    )
