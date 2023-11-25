@@ -57,9 +57,23 @@ def get_available_classes(student_id: int):
     if not student_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
     
-    # Determine the query for classes based on waitlist_count
-    if student_data['waitlist_count'] >= MAX_WAITLIST:
-        # Using query with GSI - classes that are not full
+    # Initialize classes list
+    classes = []
+    '''if student_data['waitlist_count'] >= MAX_WAITLIST:
+        print(student_data['waitlist_count'])
+        # Logic for classes with current_enroll < max_enroll
+        class_response = class_table.scan(FilterExpression='current_enroll < max_enroll')
+        classes = class_response.get('Items')
+    else:
+        print("Inside else")
+        class_response = class_table.scan()
+        all_classes = class_response.get('Items')
+
+        # Filtering classes based on the condition: current_enroll < max_enroll + 15
+        classes = [c for c in all_classes if c['current_enroll'] < (c['max_enroll'] + 15)]'''
+    student_waitlist_count = get_waitlist_count(student_id=student_id, redis_client=redis_client)
+    #check waitlist count for the student 
+    if student_waitlist_count >= MAX_WAITLIST:
         class_response = class_table.query(
             IndexName='AvailableSlotsIndex',
             KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').gt(0)
