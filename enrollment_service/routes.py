@@ -29,6 +29,8 @@ def get_db():
 # Called when a student is dropped from a class / waiting list
 # and the enrollment place must be reordered
 def reorder_placement(cur, total_enrolled, placement, class_id):
+
+    # TODO: Rewrite this method using dynamoDB and update all calls to it.
     counter = 1
     while counter <= total_enrolled:
         if counter > placement:
@@ -367,7 +369,7 @@ def remove_from_waitlist(student_id: int, class_id: int, db: sqlite3.Connection 
 
 # Get a list of students on a waitlist for a particular class that
 # a specific instructor teaches
-@router.get("/waitlist/instructors/{instructor_id}/classes/{class_id}",tags=['Waitlist'])
+@router.get("/waitlist/instructors/{instructor_id}/classes/{class_id}", tags=['Waitlist'])
 def view_current_waitlist(instructor_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
 
@@ -406,34 +408,27 @@ def view_current_waitlist(instructor_id: int, class_id: int, db: sqlite3.Connect
 # ==========================================Instructor==================================================
 
 
-# view list of current students enrolled for class
+# View list of current students enrolled for class
 @router.get("/instructors/{instructor_id}/classes/{class_id}/enrollment", tags=['Instructor'])
 def get_instructor_enrollment(instructor_id: int, class_id: int):
     class_table = dynamodb.Table('class')
-    instructor_table = dynamodb.Table('instructor')
     student_table = dynamodb.Table('student')
     enrollment_table = dynamodb.Table('enrollment')
-
-    # Make sure instructor and class id exist
-    instructor_response = instructor_table.get_item(Key={'id': instructor_id})
-    instructor_data = instructor_response.get('Item')
 
     class_response = class_table.get_item(Key={'id': class_id})
     class_data = class_response.get('Item')
 
-    if not instructor_data or not class_data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Instructor or Class doesnt exist")
+    check_instructor_or_class_exist(instructor_id, class_id)
 
-    # Make sure the class and instructor match
-    if class_data['instructor_id'] != instructor_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class doesnt exist with instructor selected")
-
+    # Query for enrollment data by class_id
     enrollment_data = enrollment_table.query(
         IndexName='ClassIndex',
         KeyConditionExpression=Key('class_id').eq(class_id)
     )
 
     student_data = []
+
+    # TODO: Clean up endpoint return object
 
     for student in enrollment_data['Items']:
         student_name = student_table.get_item(Key={'id': student['student_id']}).get('Item').get('name')
@@ -443,148 +438,89 @@ def get_instructor_enrollment(instructor_id: int, class_id: int):
 
     return {"Enrolled": class_data}
 
-    # cursor = db.cursor()
-    #
-    # # check if exist
-    # cursor.execute("SELECT * FROM instructor WHERE id = ?", (instructor_id,))
-    # instructor_data = cursor.fetchone()
-    #
-    # cursor.execute("SELECT * FROM class WHERE id = ?", (class_id,))
-    # class_data = cursor.fetchone()
-    #
-    #
-    # cursor.execute("SELECT * FROM class WHERE id = ? AND instructor_id = ?", (class_id,instructor_id))
-    # assigned_data = cursor.fetchone()
-    #
-    # if not assigned_data:
-    #     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Instructor not assigned to Class")
-    #
-    # #Fetch relavent data for instructor
-    # cursor.execute("""SELECT class.id AS class_id, class.name AS class_name, department.name AS department_name,
-    #                 class.course_code, class.section_number, class.max_enroll,
-    #                 student.id AS student_id, student.name AS student_name, enrollment.placement
-    #                 FROM enrollment
-    #                 JOIN class ON enrollment.class_id = class.id
-    #                 JOIN student ON enrollment.student_id = student.id
-    #                 JOIN department ON class.department_id = department.id
-    #                 JOIN instructor ON class.instructor_id = instructor.id
-    #                 WHERE class.instructor_id = ? AND enrollment.class_id = ?
-    #                 AND enrollment.placement <= class.max_enroll""", (instructor_id, class_id))
-    # enrolled_data = cursor.fetchall()
-    #
-    # return {"Enrolled": enrolled_data}
 
-
-#view students who have dropped the class
+# View list of students who have dropped the class
 @router.get("/instructors/{instructor_id}/classes/{class_id}/drop", tags=['Instructor'])
 def get_instructor_dropped(instructor_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+    student_table = dynamodb.Table('student')
+    dropped_table = dynamodb.Table('dropped')
 
-    #Check if exist
-    cursor.execute("SELECT * FROM instructor WHERE id = ?", (instructor_id,))
-    instructor_data = cursor.fetchone()
-    cursor.execute("SELECT * FROM class WHERE id = ?", (class_id,))
-    class_data = cursor.fetchone()
+    dropped_data = dropped_table.query(
+        KeyConditionExpression=Key('class_id').eq(class_id)
+    )
 
-    if not instructor_data or not class_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instructor and/or class not found")
+    check_instructor_or_class_exist(instructor_id, class_id)
 
-    cursor.execute("SELECT * FROM class WHERE id = ? AND instructor_id = ?", (class_id,instructor_id))
-    assigned_data = cursor.fetchone()
+    result = []
+    for student in dropped_data['Items']:
+        student_ids = student_table.get_item(Key={'id': student.get('student_id')})
+        result.append(student_ids['Item']['name'])
 
-    if not assigned_data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Instructor not assigned to Class")
-    
-    cursor.execute("""SELECT student.id AS student_id, student.name AS student_name
-                        FROM dropped 
-                        JOIN student ON dropped.student_id = student.id
-                        WHERE dropped.class_id = ?""", (class_id,))
-    dropped_data = cursor.fetchall()
-    
-    return dropped_data
+    return {'dropped_students': result}
 
 
-#Instructor administratively drop students
+# Instructor administratively drops student
 @router.post("/instructors/{instructor_id}/classes/{class_id}/students/{student_id}/drop", tags=['Instructor'])
-def instructor_drop_class(instructor_id: int, class_id: int, student_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+def instructor_drop_class(instructor_id: int, class_id: int, student_id: int):
+    student_table = dynamodb.Table('student')
+    enrollment_table = dynamodb.Table('enrollment')
 
-    #Check if exist
-    cursor.execute("SELECT * FROM instructor WHERE id = ?", (instructor_id,))
-    instructor_data = cursor.fetchone()
-    
-    cursor.execute("SELECT * FROM student WHERE id = ?", (student_id,))
-    student_data = cursor.fetchone()
+    # Check if student exists
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
 
-    if not instructor_data or not student_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instructor and/or student not found")
+    if not student_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
 
-    cursor.execute("SELECT * FROM class WHERE id = ? AND instructor_id = ?", (class_id, instructor_id))
-    target_class_data = cursor.fetchone()
+    check_instructor_or_class_exist(instructor_id, class_id)
 
-    if not target_class_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found or instructor is not teaching this class")
+    # Check if student is in the class
+    enrollment_response = enrollment_table.get_item(Key={'student_id': student_id, 'class_id': class_id})
+    enrollment_data = enrollment_response.get('Item')
 
-    cursor.execute("""SELECT * FROM enrollment
-                        WHERE class_id = ? AND student_id = ?
-                    """,(class_id, student_id))
-    enroll_data = cursor.fetchone()
-    if not enroll_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not enrolled in class")
-    
-    # remove student from class
-    cursor.execute("DELETE FROM enrollment WHERE student_id = ? AND class_id = ?", (student_id, class_id))
-    reorder_placement(cursor, target_class_data['current_enroll'], enroll_data['placement'], class_id)
+    if not enrollment_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not enrolled in selected class")
 
-    db.commit()
+    # Drop student from class
+    enrollment_table.delete_item(Key={'student_id': student_id, 'class_id': class_id})
+    # TODO: Will need to call reorder method after student is removed from class to change enrollment order number
 
-    #Fetch relavent data for instructor
-    cursor.execute("""SELECT class.id AS class_id, class.name AS class_name, department.name AS department_name,
-                    class.course_code, class.section_number, class.max_enroll,
-                    student.id AS student_id, student.name AS student_name, enrollment.placement
-                    FROM enrollment 
-                    JOIN class ON enrollment.class_id = class.id
-                    JOIN student ON enrollment.student_id = student.id
-                    JOIN department ON class.department_id = department.id
-                    JOIN instructor ON class.instructor_id = instructor.id
-                    WHERE class.instructor_id = ? AND enrollment.class_id = ? 
-                    AND enrollment.placement <= class.max_enroll""", (instructor_id, class_id))
-    enrolled_data = cursor.fetchall()
-    
-
-    return {"Enrollment" : enrolled_data}
+    # We will return the new list of students enrolled in the class
+    return get_instructor_enrollment(instructor_id=instructor_id, class_id=class_id)
 
 
-#==========================================registrar==================================================
+# ==========================================registrar==================================================
 
 
 # Create a new class
-@router.post("/registrar/classes/", response_model=Class, tags=['Registrar'])
+@router.post("/registrar/classes/", tags=['Registrar'])
 def create_class(class_data: Class, db: sqlite3.Connection = Depends(get_db)):
-    try:
-        db.execute(
-            """
-            INSERT INTO class (id, name, course_code, section_number, current_enroll, max_enroll, department_id, instructor_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                class_data.id,
-                class_data.name,
-                class_data.course_code,
-                class_data.section_number,
-                class_data.current_enroll,
-                class_data.max_enroll,
-                class_data.department_id,
-                class_data.instructor_id
-            )
-        )
-        db.commit()
-        return class_data
-    except sqlite3.IntegrityError as e:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"type": type(e).__name__, "msg": str(e)}
-        )
+    class_table = dynamodb.Table('class')
+    class_response = class_table.get_item(Key={'id': class_data.id}).get('Item')
+
+    # Check if class id exists
+    if class_response:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Class id already exists")
+
+    available_slot = class_data.max_enroll - class_data.current_enroll
+
+    class_table.put_item(
+        Item={
+            'id': class_data.id,
+            'name': class_data.name,
+            'course_code': class_data.course_code,
+            'section_number': class_data.section_number,
+            'current_enroll': class_data.current_enroll,
+            'max_enroll': class_data.max_enroll,
+            'department_id': class_data.department_id,
+            'instructor_id': class_data.instructor_id,
+            'available_slot': available_slot,
+            'constantGSI': "ALL"
+        }
+    )
+
+    return {"http_status_code": status.HTTP_201_CREATED, "http_body": "created"}
+
 
 # Remove a class
 @router.delete("/registrar/classes/{class_id}", tags=['Registrar'])
@@ -639,7 +575,8 @@ def freeze_automatic_enrollment():
         FREEZE = True
         return {"message": "Automatic enrollment frozen successfully"}
 
-######Helpers#####
+
+# ==========================================helpers==================================================
 def update_class_availability(dynamodb_client, class_id, max_enroll, current_enroll):
     class_table = dynamodb_client.Table('class')
     available_slots = max_enroll - current_enroll
@@ -649,3 +586,25 @@ def update_class_availability(dynamodb_client, class_id, max_enroll, current_enr
         UpdateExpression="SET availableSlots = :val",
         ExpressionAttributeValues={':val': available_slots}
     )
+
+
+def check_instructor_or_class_exist(instructor_id: int, class_id: int):
+    class_table = dynamodb.Table('class')
+    instructor_table = dynamodb.Table('instructor')
+
+    # Make sure instructor and class id exist
+    instructor_response = instructor_table.get_item(Key={'id': instructor_id})
+    instructor_data = instructor_response.get('Item')
+
+    class_response = class_table.get_item(Key={'id': class_id})
+    class_data = class_response.get('Item')
+
+    if not instructor_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Instructor doesnt exist")
+
+    if not class_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Class doesnt exist")
+
+    # Make sure the class and instructor match
+    if class_data['instructor_id'] != instructor_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instructor doesn't teach class selected")

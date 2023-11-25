@@ -321,7 +321,7 @@
       }
     },
     {
-      "endpoint": "/api/instructors/registrar/classes/",
+      "endpoint": "/api/registrar/classes/",
       "method": "POST",
       "backend": [
         {
