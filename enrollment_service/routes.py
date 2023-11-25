@@ -59,18 +59,6 @@ def get_available_classes(student_id: int):
     
     # Initialize classes list
     classes = []
-    '''if student_data['waitlist_count'] >= MAX_WAITLIST:
-        print(student_data['waitlist_count'])
-        # Logic for classes with current_enroll < max_enroll
-        class_response = class_table.scan(FilterExpression='current_enroll < max_enroll')
-        classes = class_response.get('Items')
-    else:
-        print("Inside else")
-        class_response = class_table.scan()
-        all_classes = class_response.get('Items')
-
-        # Filtering classes based on the condition: current_enroll < max_enroll + 15
-        classes = [c for c in all_classes if c['current_enroll'] < (c['max_enroll'] + 15)]'''
     student_waitlist_count = get_waitlist_count(student_id=student_id, redis_client=redis_client)
     #check waitlist count for the student 
     if student_waitlist_count >= MAX_WAITLIST:
@@ -234,44 +222,6 @@ def enroll_student_in_class(student_id: int, class_id: int):
 # Have a student drop a class they're enrolled in
 @router.delete("/students/classes/{class_id}", tags=['Students drop their own classes'])
 def drop_student_from_class(class_id: int, student_id: int = Header(None, alias="x-cwid"), db: sqlite3.Connection = Depends(get_db)):
-    '''cursor = db.cursor()
-
-    # check if exist
-    cursor.execute("SELECT * FROM student WHERE id = ?", (student_id,))
-    student_data = cursor.fetchone()
-
-    cursor.execute("SELECT * FROM class WHERE id = ?", (class_id,))
-    class_data = cursor.fetchone()
-
-    if not student_data or not class_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student or Class not found")
-
-    #check enrollment
-    cursor.execute("SELECT * FROM enrollment WHERE student_id = ? AND class_id = ?", (student_id, class_id))
-    enrollment_data = cursor.fetchone()
-
-    cursor.execute("""SELECT * FROM enrollment
-                    JOIN class ON enrollment.class_id = class.id
-                    WHERE enrollment.student_id = ?
-                    AND enrollment.placement > class.max_enroll""", (student_id,))
-    waitlist_data = cursor.fetchone()
-    
-    if not enrollment_data and not waitlist_data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student is not enrolled in the class")
-
-    # remove student from class
-    cursor.execute("DELETE FROM enrollment WHERE student_id = ? AND class_id = ?", (student_id, class_id))
-    reorder_placement(cursor, class_data['current_enroll'], enrollment_data['placement'], class_id)
-
-    # Update dropped table
-    cursor.execute(""" INSERT INTO dropped (class_id, student_id)
-                    VALUES (?, ?)""",(class_id, student_id))
-    db.commit()
-    
-    # Fetch data to return
-    cursor.execute("""SELECT * FROM dropped
-                    WHERE class_id = ? and student_id = ?""",(class_id, student_id))
-    dropped_data = cursor.fetchone()'''
     student_table = dynamodb.Table('student')
     class_table = dynamodb.Table('class')
     enrollment_table = dynamodb.Table('enrollment')
@@ -342,148 +292,151 @@ def drop_student_from_class(class_id: int, student_id: int = Header(None, alias=
 
 
 # Get all classes with waiting lists
-# TODO: Update to use redis
 @router.get("/waitlist/classes", tags=['Waitlist'])
 def view_all_class_waitlists(db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()  
-
-    # fetch all relevant waitlist information for student
-    cursor.execute("""
-        SELECT class.id AS class_id, department.id AS department_id, class.course_code, 
-        class.section_number, class.name AS class_name, instructor.id AS instructor_id,
-        class.current_enroll - class.max_enroll AS waitlist_total
-        FROM class
-        JOIN department ON class.department_id = department.id
-        JOIN instructor ON class.instructor_id = instructor.id
-        WHERE class.current_enroll > class.max_enroll
-        """
+    class_table = dynamodb.Table('class')
+    response = class_table.query(
+            IndexName='AvailableSlotsIndex',
+            KeyConditionExpression=Key('constantGSI').eq("ALL") & Key('available_slot').lt(0)
     )
-    waitlist_data = cursor.fetchall()
-    # Check if exist
-    if not waitlist_data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No classes have wait-lists")
-
-    return {"Waitlists": waitlist_data}
+    return {"Waitlists": response}
 
 
 # Get all waiting lists for a student
-# TODO: Update to use redis
 @router.get("/waitlist/students/{student_id}", tags=['Waitlist'])
 def view_waiting_list(student_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
-
-    # Retrieve waitlist entries for the specified student from the database
-    # cursor.execute("SELECT waitlist_count FROM student WHERE id = ? AND waitlist_count > 0", (student_id,))
-    # waitlist_data = cursor.fetchall()
     waitlist_data = get_waitlist_count(student_id=student_id, redis_client=redis_client)
 
     # Check if exist
     if waitlist_data == 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student is not on a waitlist")  
+    student_table = dynamodb.Table('student')
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
+    if not student_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
 
-    # fetch all relevant waitlist information for student
-    cursor.execute("""
-        SELECT class.id, department.name AS department_name, class.course_code, 
-        class.section_number, class.name AS class_name, instructor.name AS instructor_name,
-        enrollment.placement - class.max_enroll AS waitlist_placement
-        FROM enrollment
-        JOIN class ON enrollment.class_id = class.id
-        JOIN student ON enrollment.student_id = student.id
-        JOIN department ON class.department_id = department.id
-        JOIN instructor ON class.instructor_id = instructor.id
-        WHERE student.id = ? AND class.current_enroll > class.max_enroll
-        """, (student_id,)
+    enrollment_table = dynamodb.Table('enrollment')
+    department_table = dynamodb.Table('department')
+    class_table = dynamodb.Table('class')
+    # Query DynamoDB
+    response = enrollment_table.query(
+        KeyConditionExpression=Key('student_id').eq(student_id)
     )
-    waitlist_data = cursor.fetchall()
+    # creating list to store class details
+    waitlist_classes = []
 
-    return {"Waitlists": waitlist_data}
-
+    # Loop through the class_id in response 
+    for item in response['Items']:
+        class_id = item['class_id']
+        # get details of particular classes in class_response
+        class_response = class_table.get_item(
+            Key={'id': class_id}  
+        )
+        if 'Item' in class_response:
+            waitlist_class = class_response['Item']
+            # logic to only show classes which the student is waitlist in
+            if waitlist_class.get('current_enroll') > waitlist_class.get('max_enroll'):
+                department = department_table.get_item(Key={'id': waitlist_class['department_id']}).get('Item')
+                waitlist_classes.append({
+                    "id": waitlist_class.get('id'),
+                    "department_name": department.get('name'),
+                    "course_code": waitlist_class.get('course_code'),
+                    "section_number": waitlist_class.get('section_number'),
+                    "class_name": waitlist_class.get('name'),
+                    "current_enroll": waitlist_class.get('current_enroll')
+                })
+    # Construct the final response
+    final_response = {"Waitlist": waitlist_classes}
+    return final_response
 
 # remove a student from a waiting list
-# TODO: Update to use redis
 @router.put("/waitlist/students/{student_id}/classes/{class_id}/drop", tags=['Waitlist'])
 def remove_from_waitlist(student_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
-    
-    # check if exist
-    cursor.execute("SELECT * FROM student WHERE id = ?", (student_id,))
-    student_data = cursor.fetchone()
+    student_table = dynamodb.Table('student')
+    student_response = student_table.get_item(Key={'id': student_id})
+    student_data = student_response.get('Item')
+    if not student_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
 
-    cursor.execute("SELECT * FROM class WHERE id = ?", (class_id,))
-    class_data = cursor.fetchone()
-
-    if not student_data or not class_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student or Class not found")
+    class_table = dynamodb.Table('class')
+    class_response = class_table.get_item(Key={'id': class_id})
+    class_data = class_response.get('Item')
+    if not class_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
     
-    # cursor.execute("SELECT * FROM student WHERE id = ? AND waitlist_count > 0", (student_id,))
-    # student_data = cursor.fetchone()
     student_data = get_waitlist_count(student_id=student_id, redis_client=redis_client)
 
     if student_data == 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student is not on the waitlist")
+    enrollment_table = dynamodb.Table('enrollment')
+    # Check if student is in the class
+    enrollment_response = enrollment_table.get_item(Key={'student_id': student_id, 'class_id': class_id})
+    enrollment_data = enrollment_response.get('Item')
 
-    cursor.execute("""SELECT enrollment.placement, class.current_enroll
-                    FROM enrollment 
-                    JOIN class ON enrollment.class_id = class.id
-                    WHERE student_id = ? AND class_id = ?
-                    AND enrollment.placement > class.max_enroll
-                    """, (student_id, class_id))
-    waitlist_entry = cursor.fetchone()
+    if not enrollment_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not enrolled in selected class")
+    waitlist_entry = None
+    # for item in enrollment_data['Items']:
+    class_id = enrollment_data['class_id']
+    # get details of particular classes in class_response
+    class_response = class_table.get_item(Key={'id': class_id} )
+    if 'Item' in class_response:
+        waitlist_class = class_response['Item']
+        if enrollment_data['placement'] > waitlist_class['max_enroll']:
+            waitlist_entry = waitlist_class
 
     if waitlist_entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student is not on the waiting list for this class")
 
-    # Delete student from waitlist enrollment
-    cursor.execute("DELETE FROM enrollment WHERE student_id = ? AND class_id = ?", (student_id, class_id))
-    # cursor.execute("""UPDATE student SET waitlist_count = waitlist_count - 1
-    #                 WHERE id = ?""", (student_id,))
+    enrollment_table.delete_item(Key={'student_id': student_id, 'class_id': class_id})
     decrement_wailist_count(student_id=student_id, redis_client=redis_client)
-    
-    # Reorder enrollment placements
-    reorder_placement(cursor, waitlist_entry['current_enroll'], waitlist_entry['placement'], class_id)
-    db.commit()
-
+    reorder_placement_dynamodb(enrollment_data['placement'],class_id)
+  
     return {"message": "Student removed from the waiting list"}
 
 
 # Get a list of students on a waitlist for a particular class that
 # a specific instructor teaches
-# TODO: Update to use redis
 @router.get("/waitlist/instructors/{instructor_id}/classes/{class_id}", tags=['Waitlist'])
 def view_current_waitlist(instructor_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
+    class_table = dynamodb.Table('class')
+    enrollment_table = dynamodb.Table('enrollment')
+    department_table = dynamodb.Table('department')
+    check_instructor_or_class_exist(instructor_id, class_id)
 
-   # check if exist
-    cursor.execute("SELECT * FROM instructor WHERE id = ?", (instructor_id,))
-    instructor_data = cursor.fetchone()
-
-    cursor.execute("SELECT * FROM class WHERE id = ?", (class_id,))
-    class_data = cursor.fetchone()
-
-    if not instructor_data or not class_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instructor or Class not found")  
-
-    # fetch all relevant waitlist information for instructor
-    cursor.execute("""
-        SELECT class.id AS class_id, department.name AS department_name, class.course_code, 
-        class.section_number, class.name AS class_name, enrollment.student_id AS student_id, 
-        enrollment.placement - class.max_enroll AS waitlist_placement
-        FROM enrollment
-        JOIN class ON enrollment.class_id = class.id
-        JOIN department ON class.department_id = department.id
-        JOIN instructor ON class.instructor_id = instructor.id
-        WHERE instructor.id = ? AND class.current_enroll > class.max_enroll
-        AND enrollment.placement > class.max_enroll
-        """, (instructor_id,)
+    # Query for enrollment data by class_id
+    enrollment_data = enrollment_table.query(
+        IndexName='ClassIndex',
+        KeyConditionExpression=Key('class_id').eq(class_id)
     )
-    waitlist_data = cursor.fetchall()
+    waitlist_classes = []
 
-    #Check if exist
-    if not waitlist_data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Class does not have a waitlist")
-
-    return {"Waitlist": waitlist_data}
-
+    # Loop through the class_id in response 
+    for item in enrollment_data['Items']:
+        class_id = item['class_id']
+        # get details of particular classes in class_response
+        class_response = class_table.get_item(
+            Key={'id': class_id}  
+        )
+        if 'Item' in class_response:
+            waitlist_class = class_response['Item']
+            # logic to only show classes which the student is waitlist in
+            if waitlist_class.get('current_enroll') > waitlist_class.get('max_enroll') and item['placement'] > waitlist_class['max_enroll']:
+                department = department_table.get_item(Key={'id': waitlist_class['department_id']}).get('Item')
+                waitlist_classes.append({
+                    "id": waitlist_class.get('id'),
+                    "student_id": item['student_id'],
+                    "department_name": department.get('name'),
+                    "course_code": waitlist_class.get('course_code'),
+                    "section_number": waitlist_class.get('section_number'),
+                    "class_name": waitlist_class.get('name'),
+                    "current_enroll": waitlist_class.get('current_enroll'),
+                    "waitlist_placement" : item['placement'] - waitlist_class['max_enroll']
+                })
+    # Construct the final response
+    final_response = {"Waitlist": waitlist_classes}
+    return {"Waitlist": final_response}
 
 # ==========================================Instructor==================================================
 
@@ -554,14 +507,12 @@ def instructor_drop_class(instructor_id: int, class_id: int, student_id: int):
 
     # Drop student from class
     enrollment_table.delete_item(Key={'student_id': student_id, 'class_id': class_id})
-    # TODO: Will need to call reorder method after student is removed from class to change enrollment order number
-
+    reorder_placement_dynamodb(enrollment_data['placement'], class_id)
     # We will return the new list of students enrolled in the class
     return get_instructor_enrollment(instructor_id=instructor_id, class_id=class_id)
 
 
 # ==========================================registrar==================================================
-
 
 # Create a new class
 @router.post("/registrar/classes/", tags=['Registrar'])
