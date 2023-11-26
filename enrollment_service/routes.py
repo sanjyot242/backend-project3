@@ -337,7 +337,7 @@ def view_waiting_list(student_id: int, ):
 
 # remove a student from a waiting list
 @router.put("/waitlist/students/{student_id}/classes/{class_id}/drop", tags=['Waitlist'])
-def remove_from_waitlist(student_id: int, class_id: int, ):
+def remove_from_waitlist(student_id: int, class_id: int ):
     student_table = dynamodb.Table('student')
     student_response = student_table.get_item(Key={'id': student_id})
     student_data = student_response.get('Item')
@@ -384,7 +384,7 @@ def remove_from_waitlist(student_id: int, class_id: int, ):
 # Get a list of students on a waitlist for a particular class that
 # a specific instructor teaches
 @router.get("/waitlist/instructors/{instructor_id}/classes/{class_id}", tags=['Waitlist'])
-def view_current_waitlist(instructor_id: int, class_id: int, ):
+def view_current_waitlist(instructor_id: int, class_id: int ):
     class_table = dynamodb.Table('class')
     enrollment_table = dynamodb.Table('enrollment')
     department_table = dynamodb.Table('department')
