@@ -25,21 +25,6 @@ def get_db():
         yield db
 
 
-# Called when a student is dropped from a class / waiting list
-# and the enrollment place must be reordered
-def reorder_placement(cur, total_enrolled, placement, class_id):
-
-    # TODO: Rewrite this method using dynamoDB and update all calls to it.
-    counter = 1
-    while counter <= total_enrolled:
-        if counter > placement:
-            cur.execute("""UPDATE enrollment SET placement = placement - 1 
-                WHERE class_id = ? AND placement = ?""", (class_id,counter))
-        counter += 1
-    cur.execute("""UPDATE class SET current_enroll = current_enroll - 1
-                WHERE id = ?""",(class_id,))
-
-
 # ==========================================students==================================================
 
 # gets available classes for a student
@@ -221,7 +206,7 @@ def enroll_student_in_class(student_id: int, class_id: int):
 
 # Have a student drop a class they're enrolled in
 @router.delete("/students/classes/{class_id}", tags=['Students drop their own classes'])
-def drop_student_from_class(class_id: int, student_id: int = Header(None, alias="x-cwid"), db: sqlite3.Connection = Depends(get_db)):
+def drop_student_from_class(class_id: int, student_id: int = Header(None, alias="x-cwid")):
     student_table = dynamodb.Table('student')
     class_table = dynamodb.Table('class')
     enrollment_table = dynamodb.Table('enrollment')
@@ -293,7 +278,7 @@ def drop_student_from_class(class_id: int, student_id: int = Header(None, alias=
 
 # Get all classes with waiting lists
 @router.get("/waitlist/classes", tags=['Waitlist'])
-def view_all_class_waitlists(db: sqlite3.Connection = Depends(get_db)):
+def view_all_class_waitlists():
     class_table = dynamodb.Table('class')
     response = class_table.query(
             IndexName='AvailableSlotsIndex',
@@ -304,7 +289,7 @@ def view_all_class_waitlists(db: sqlite3.Connection = Depends(get_db)):
 
 # Get all waiting lists for a student
 @router.get("/waitlist/students/{student_id}", tags=['Waitlist'])
-def view_waiting_list(student_id: int, db: sqlite3.Connection = Depends(get_db)):
+def view_waiting_list(student_id: int, ):
     waitlist_data = get_waitlist_count(student_id=student_id, redis_client=redis_client)
 
     # Check if exist
@@ -352,7 +337,7 @@ def view_waiting_list(student_id: int, db: sqlite3.Connection = Depends(get_db))
 
 # remove a student from a waiting list
 @router.put("/waitlist/students/{student_id}/classes/{class_id}/drop", tags=['Waitlist'])
-def remove_from_waitlist(student_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
+def remove_from_waitlist(student_id: int, class_id: int, ):
     student_table = dynamodb.Table('student')
     student_response = student_table.get_item(Key={'id': student_id})
     student_data = student_response.get('Item')
@@ -399,7 +384,7 @@ def remove_from_waitlist(student_id: int, class_id: int, db: sqlite3.Connection 
 # Get a list of students on a waitlist for a particular class that
 # a specific instructor teaches
 @router.get("/waitlist/instructors/{instructor_id}/classes/{class_id}", tags=['Waitlist'])
-def view_current_waitlist(instructor_id: int, class_id: int, db: sqlite3.Connection = Depends(get_db)):
+def view_current_waitlist(instructor_id: int, class_id: int, ):
     class_table = dynamodb.Table('class')
     enrollment_table = dynamodb.Table('enrollment')
     department_table = dynamodb.Table('department')
@@ -649,13 +634,15 @@ def reorder_placement_dynamodb(placement, class_id):
         KeyConditionExpression=Key('class_id').eq(class_id) & Key('placement').gt(placement)
     )
     items = response['Items']
+    print(items)
 
     # Update placements
     for item in items:
         new_placement = item['placement'] - 1
         enrollment_table.update_item(
             Key={
-                'enrollment_id': item['enrollment_id']  # Assume 'enrollment_id' is the primary key
+                 "class_id": item['class_id'],# Assume 'enrollment_id' is the primary key
+                 "student_id" : item['student_id']
             },
             UpdateExpression='SET placement = :val',
             ExpressionAttributeValues={
